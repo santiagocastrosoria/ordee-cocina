@@ -67,8 +67,6 @@ const viewLabel: Record<ViewKey, string> = {
   mesas: "Gestión de Mesas"
 };
 
-const orderStatusOptions: OrderRow["status"][] = ["nuevo", "preparando", "listo", "entregado", "cancelado"];
-
 export default function PanelPage() {
   const router = useRouter();
   const [view, setView] = useState<ViewKey>("cocina");
@@ -203,6 +201,46 @@ export default function PanelPage() {
   const pendingOrders = useMemo(() => orders.filter((order) => order.payment_status !== "pagado"), [orders]);
   const paidOrders = useMemo(() => orders.filter((order) => order.payment_status === "pagado"), [orders]);
 
+  const kitchenQueue = useMemo(
+    () =>
+      orders.filter(
+        (order) =>
+          order.payment_status === "pagado" && order.status !== "entregado" && order.status !== "cancelado"
+      ),
+    [orders]
+  );
+
+  const historialPedidos = useMemo(
+    () =>
+      [...orders]
+        .filter((order) => order.status === "entregado")
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()),
+    [orders]
+  );
+
+  const deleteOrder = (id: string) => {
+    void fetch(`/api/staff/orders/${id}`, { method: "DELETE" }).then(() => {
+      fetchOrders();
+      fetchMetrics();
+    });
+  };
+
+  const clearHistorialEntregados = () => {
+    if (!window.confirm("¿Borrar todos los pedidos entregados del historial? No se puede deshacer.")) return;
+    void fetch("/api/staff/orders/cleanup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "delivered" })
+    }).then(async (res) => {
+      if (!res.ok) {
+        window.alert("No se pudo limpiar el historial");
+        return;
+      }
+      fetchOrders();
+      fetchMetrics();
+    });
+  };
+
   const updateOrder = async (id: string, patch: { status?: OrderRow["status"]; paymentStatus?: OrderRow["payment_status"]; cancelReason?: string }) => {
     await fetch(`/api/staff/orders/${id}`, {
       method: "PATCH",
@@ -254,36 +292,75 @@ export default function PanelPage() {
           ) : null}
 
           {view === "cocina" ? (
-            <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(290px,1fr))" }}>
-              {orders.map((order) => {
-                const minutes = Math.floor((Date.now() - new Date(order.created_at).getTime()) / 60000);
-                const delayed = minutes >= 20 && order.status !== "entregado";
-                return (
-                  <article key={order.id} className="card" style={{ borderColor: delayed ? "#f59e0b" : undefined }}>
-                    <strong>{order.customer_name}</strong>
-                    <p style={{ margin: "4px 0" }}>Mesa: {order.table_number ?? "Takeaway"}</p>
-                    <p style={{ margin: "4px 0" }}>Hora: {new Date(order.created_at).toLocaleTimeString("es-AR")}</p>
-                    <p style={{ margin: "4px 0" }}>Estado: {order.status}</p>
-                    <p style={{ margin: "4px 0" }}>Pago: {order.payment_status}</p>
-                    {delayed ? <p style={{ color: "#fbbf24", margin: "4px 0" }}>Demorado ({minutes} min)</p> : null}
-                    <ul>
-                      {order.order_items.map((item, idx) => (
-                        <li key={`${order.id}-${idx}`}>
-                          {item.quantity} x {item.item_name}
-                        </li>
-                      ))}
-                    </ul>
-                    <p>Total: ${order.total_ars}</p>
-                    <div style={{ display: "grid", gap: 6, gridTemplateColumns: "1fr 1fr" }}>
-                      {orderStatusOptions.map((status) => (
-                        <button key={status} type="button" onClick={() => updateOrder(order.id, { status })}>
-                          {status}
+            <div style={{ display: "grid", gap: 20 }}>
+              <div>
+                <h3 style={{ marginTop: 0, marginBottom: 8 }}>Pedidos en cocina (solo pagados)</h3>
+                <p style={{ fontSize: 13, opacity: 0.85, marginBottom: 12 }}>
+                  Los pedidos con Mercado Pago aparecen acá cuando el pago está aprobado.
+                </p>
+                <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(290px,1fr))" }}>
+                  {kitchenQueue.map((order) => {
+                    const minutes = Math.floor((Date.now() - new Date(order.created_at).getTime()) / 60000);
+                    const delayed = minutes >= 20 && order.status !== "entregado";
+                    return (
+                      <article key={order.id} className="card" style={{ borderColor: delayed ? "#f59e0b" : undefined }}>
+                        <strong>{order.customer_name}</strong>
+                        <p style={{ margin: "4px 0" }}>Mesa: {order.table_number ?? "—"}</p>
+                        <p style={{ margin: "4px 0" }}>Hora: {new Date(order.created_at).toLocaleTimeString("es-AR")}</p>
+                        <p style={{ margin: "4px 0" }}>Estado: {order.status}</p>
+                        <p style={{ margin: "4px 0" }}>Pago: {order.payment_status}</p>
+                        <p style={{ margin: "4px 0", fontSize: 12 }}>Medio: {order.payment_method}</p>
+                        {delayed ? <p style={{ color: "#fbbf24", margin: "4px 0" }}>Demorado ({minutes} min)</p> : null}
+                        <ul>
+                          {order.order_items.map((item, idx) => (
+                            <li key={`${order.id}-${idx}`}>
+                              {item.quantity} x {item.item_name}
+                            </li>
+                          ))}
+                        </ul>
+                        <p>Total: ${order.total_ars}</p>
+                        <div style={{ display: "grid", gap: 6, gridTemplateColumns: "1fr 1fr" }}>
+                          <button type="button" onClick={() => updateOrder(order.id, { status: "preparando" })}>
+                            Preparar
+                          </button>
+                          <button type="button" onClick={() => updateOrder(order.id, { status: "entregado" })}>
+                            Entregado
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          style={{ marginTop: 8, width: "100%" }}
+                          onClick={() => {
+                            if (!window.confirm("¿Estás seguro de eliminar el pedido?")) return;
+                            deleteOrder(order.id);
+                          }}
+                        >
+                          Eliminar pedido
                         </button>
-                      ))}
+                      </article>
+                    );
+                  })}
+                </div>
+                {kitchenQueue.length === 0 ? <p style={{ opacity: 0.8 }}>No hay pedidos pagados pendientes de entrega.</p> : null}
+              </div>
+
+              <div>
+                <h3 style={{ marginTop: 0, marginBottom: 8 }}>Historial (entregados)</h3>
+                <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                  <button type="button" onClick={clearHistorialEntregados}>
+                    Reiniciar historial (borrar entregados)
+                  </button>
+                </div>
+                <div style={{ display: "grid", gap: 8 }}>
+                  {historialPedidos.length === 0 ? <p style={{ opacity: 0.8 }}>Sin pedidos entregados.</p> : null}
+                  {historialPedidos.map((order) => (
+                    <div key={order.id} className="card" style={{ opacity: 0.9 }}>
+                      <strong>{order.customer_name}</strong> · Mesa {order.table_number ?? "—"} ·{" "}
+                      {new Date(order.created_at).toLocaleString("es-AR")} · ${order.total_ars}
                     </div>
-                  </article>
-                );
-              })}
+                  ))}
+                </div>
+              </div>
             </div>
           ) : null}
 
@@ -302,11 +379,11 @@ export default function PanelPage() {
                     <button onClick={() => window.print()}>Reimprimir ticket</button>
                     <button
                       onClick={() => {
-                        const reason = window.prompt("Motivo de cancelacion") ?? "Sin motivo";
-                        updateOrder(order.id, { status: "cancelado", cancelReason: reason });
+                        if (!window.confirm("¿Estás seguro de eliminar el pedido?")) return;
+                        deleteOrder(order.id);
                       }}
                     >
-                      Cancelar pedido
+                      Eliminar pedido
                     </button>
                   </div>
                 </div>
@@ -401,30 +478,19 @@ export default function PanelPage() {
                         onClick={async () => {
                           const name = window.prompt("Nuevo nombre", item.name);
                           const description = window.prompt("Nueva descripcion", item.description ?? "");
+                          const priceRaw = window.prompt("Precio ARS", String(item.price_ars));
                           if (!name) return;
+                          const price = priceRaw != null && priceRaw !== "" ? Number(priceRaw) : item.price_ars;
+                          if (Number.isNaN(price)) return;
                           await fetch("/api/staff/menu", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ action: "update", id: item.id, name, description })
+                            body: JSON.stringify({ action: "update", id: item.id, name, description: description ?? "", price_ars: price })
                           });
                           fetchMenu();
                         }}
                       >
-                        Editar nombre
-                      </button>
-                      <button
-                        onClick={async () => {
-                          const next = Number(window.prompt("Nuevo precio", String(item.price_ars)));
-                          if (Number.isNaN(next)) return;
-                          await fetch("/api/staff/menu", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ action: "update", id: item.id, price_ars: next })
-                          });
-                          fetchMenu();
-                        }}
-                      >
-                        Editar precio
+                        Editar producto
                       </button>
                       <button
                         onClick={async () => {
@@ -436,7 +502,7 @@ export default function PanelPage() {
                           fetchMenu();
                         }}
                       >
-                        {item.is_active ? "Ocultar" : "Reactivar"}
+                        {item.is_active ? "Marcar agotado" : "Volver disponible"}
                       </button>
                       <button
                         onClick={async () => {

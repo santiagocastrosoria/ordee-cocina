@@ -24,3 +24,14 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
 
   return NextResponse.json({ ok: true });
 }
+
+export async function DELETE(_request: NextRequest, { params }: { params: { id: string } }) {
+  const supabase = createSupabaseAdmin();
+  const { error } = await supabase.from("orders").delete().eq("id", params.id);
+
+  if (error) {
+    return NextResponse.json({ error: "No se pudo eliminar el pedido" }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
+}
