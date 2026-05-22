@@ -40,3 +40,24 @@ button {
 button:hover {
   background: #3f3f46;
 }
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #ticket-print-area,
+  #ticket-print-area * {
+    visibility: visible;
+  }
+  #ticket-print-area {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 80mm;
+    font-family: monospace;
+    font-size: 12px;
+    color: #000;
+    background: #fff;
+    padding: 8px;
+  }
+}

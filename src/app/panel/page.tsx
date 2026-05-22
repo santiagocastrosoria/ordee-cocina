@@ -77,6 +77,7 @@ export default function PanelPage() {
   const [tables, setTables] = useState<TableRow[]>([]);
   const [helpRequests, setHelpRequests] = useState<HelpRow[]>([]);
   const [newTable, setNewTable] = useState("21");
+  const [ticketOrder, setTicketOrder] = useState<OrderRow | null>(null);
 
   const restaurantParam = encodeURIComponent(getDefaultRestaurantSlug());
 
@@ -89,6 +90,10 @@ export default function PanelPage() {
     }
     const data = (await response.json()) as OrderRow[];
     console.info("[ORDEE-COCINA] fetchOrders ok count=", data.length);
+    const withNotes = data.filter((o) => o.notes);
+    if (withNotes.length > 0) {
+      console.info("[notes received kitchen]", withNotes.map((o) => ({ id: o.id, notes: o.notes })));
+    }
     setOrders(data);
   };
 
@@ -205,7 +210,9 @@ export default function PanelPage() {
     () =>
       orders.filter(
         (order) =>
-          order.payment_status === "pagado" && order.status !== "entregado" && order.status !== "cancelado"
+          order.status !== "entregado" &&
+          order.status !== "cancelado" &&
+          (order.payment_status === "pagado" || order.payment_method !== "mercado_pago")
       ),
     [orders]
   );
@@ -294,31 +301,53 @@ export default function PanelPage() {
           {view === "cocina" ? (
             <div style={{ display: "grid", gap: 20 }}>
               <div>
-                <h3 style={{ marginTop: 0, marginBottom: 8 }}>Pedidos en cocina (solo pagados)</h3>
+                <h3 style={{ marginTop: 0, marginBottom: 8 }}>Pedidos en cocina</h3>
                 <p style={{ fontSize: 13, opacity: 0.85, marginBottom: 12 }}>
-                  Los pedidos con Mercado Pago aparecen acá cuando el pago está aprobado.
+                  Los pedidos MP aparecen cuando el pago está aprobado. Los pedidos en efectivo aparecen de inmediato.
                 </p>
                 <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(290px,1fr))" }}>
                   {kitchenQueue.map((order) => {
                     const minutes = Math.floor((Date.now() - new Date(order.created_at).getTime()) / 60000);
                     const delayed = minutes >= 20 && order.status !== "entregado";
+                    const isCash = order.payment_method !== "mercado_pago";
+                    const isPaid = order.payment_status === "pagado";
                     return (
-                      <article key={order.id} className="card" style={{ borderColor: delayed ? "#f59e0b" : undefined }}>
-                        <strong>{order.customer_name}</strong>
+                      <article key={order.id} className="card" style={{ borderColor: delayed ? "#f59e0b" : isCash && !isPaid ? "#dc2626" : undefined }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                          <strong style={{ fontSize: 15 }}>{order.customer_name}</strong>
+                          {isCash && !isPaid ? (
+                            <span style={{ background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700, padding: "3px 7px", borderRadius: 6, letterSpacing: 0.5, whiteSpace: "nowrap" }}>
+                              COBRAR EN EFECTIVO
+                            </span>
+                          ) : (
+                            <span style={{ background: "#16a34a", color: "#fff", fontSize: 10, fontWeight: 700, padding: "3px 7px", borderRadius: 6, letterSpacing: 0.5 }}>
+                              PAGADO
+                            </span>
+                          )}
+                        </div>
                         <p style={{ margin: "4px 0" }}>Mesa: {order.table_number ?? "—"}</p>
                         <p style={{ margin: "4px 0" }}>Hora: {new Date(order.created_at).toLocaleTimeString("es-AR")}</p>
                         <p style={{ margin: "4px 0" }}>Estado: {order.status}</p>
-                        <p style={{ margin: "4px 0" }}>Pago: {order.payment_status}</p>
-                        <p style={{ margin: "4px 0", fontSize: 12 }}>Medio: {order.payment_method}</p>
+                        <p style={{ margin: "4px 0", fontSize: 12, opacity: 0.75 }}>Medio: {order.payment_method}</p>
                         {delayed ? <p style={{ color: "#fbbf24", margin: "4px 0" }}>Demorado ({minutes} min)</p> : null}
+                        {order.notes ? (
+                          <div style={{ margin: "8px 0", background: "#2d2d10", border: "1px solid #854d0e", borderRadius: 8, padding: "7px 10px" }}>
+                            <p style={{ margin: 0, fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: "#fbbf24", textTransform: "uppercase", marginBottom: 3 }}>
+                              Observaciones
+                            </p>
+                            <p style={{ margin: 0, fontSize: 13, color: "#fef3c7", lineHeight: 1.5 }}>
+                              {order.notes}
+                            </p>
+                          </div>
+                        ) : null}
                         <ul>
                           {order.order_items.map((item, idx) => (
                             <li key={`${order.id}-${idx}`}>
-                              {item.quantity} x {item.item_name}
+                              {item.quantity} × {item.item_name}
                             </li>
                           ))}
                         </ul>
-                        <p>Total: ${order.total_ars}</p>
+                        <p style={{ fontWeight: 600 }}>Total: ${order.total_ars}</p>
                         <div style={{ display: "grid", gap: 6, gridTemplateColumns: "1fr 1fr" }}>
                           <button type="button" onClick={() => updateOrder(order.id, { status: "preparando" })}>
                             Preparar
@@ -327,21 +356,47 @@ export default function PanelPage() {
                             Entregado
                           </button>
                         </div>
-                        <button
-                          type="button"
-                          style={{ marginTop: 8, width: "100%" }}
-                          onClick={() => {
-                            if (!window.confirm("¿Estás seguro de eliminar el pedido?")) return;
-                            deleteOrder(order.id);
-                          }}
-                        >
-                          Eliminar pedido
-                        </button>
+                        {isCash && !isPaid ? (
+                          <button
+                            type="button"
+                            style={{ marginTop: 6, width: "100%", background: "#16a34a", borderColor: "#15803d", color: "#fff", fontWeight: 600 }}
+                            onClick={() => {
+                              console.info("[cash marked paid]", { orderId: order.id, table: order.table_number });
+                              void updateOrder(order.id, { paymentStatus: "pagado" });
+                            }}
+                          >
+                            ✓ Marcar como pagado
+                          </button>
+                        ) : null}
+                        <div style={{ display: "grid", gap: 6, gridTemplateColumns: isCash ? "1fr 1fr" : "1fr", marginTop: 6 }}>
+                          {isCash ? (
+                            <button
+                              type="button"
+                              style={{ fontSize: 12 }}
+                              onClick={() => {
+                                console.info("[ticket print]", { orderId: order.id });
+                                setTicketOrder(order);
+                              }}
+                            >
+                              🖨 Imprimir ticket
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            style={{ fontSize: 12, background: "#3f1515", borderColor: "#7f1d1d" }}
+                            onClick={() => {
+                              if (!window.confirm("¿Estás seguro de eliminar el pedido?")) return;
+                              deleteOrder(order.id);
+                            }}
+                          >
+                            Eliminar pedido
+                          </button>
+                        </div>
                       </article>
                     );
                   })}
                 </div>
-                {kitchenQueue.length === 0 ? <p style={{ opacity: 0.8 }}>No hay pedidos pagados pendientes de entrega.</p> : null}
+                {kitchenQueue.length === 0 ? <p style={{ opacity: 0.8 }}>No hay pedidos activos.</p> : null}
               </div>
 
               <div>
@@ -581,6 +636,93 @@ export default function PanelPage() {
           ) : null}
         </section>
       </div>
+
+      {ticketOrder ? (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 50,
+            background: "rgba(0,0,0,0.75)", display: "flex",
+            alignItems: "center", justifyContent: "center", padding: 16
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setTicketOrder(null); }}
+        >
+          <div style={{ background: "#fff", color: "#111", borderRadius: 12, maxWidth: 400, width: "100%", overflow: "hidden" }}>
+            <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <strong style={{ fontSize: 15 }}>Vista previa del ticket</strong>
+              <button
+                onClick={() => setTicketOrder(null)}
+                style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 18, padding: 0 }}
+              >
+                ✕
+              </button>
+            </div>
+            <div id="ticket-print-area" style={{ padding: "20px 18px", fontFamily: "monospace", fontSize: 13, lineHeight: 1.6 }}>
+              <div style={{ textAlign: "center", marginBottom: 12 }}>
+                <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: 2 }}>ORDEE</div>
+                <div style={{ fontSize: 11, color: "#555" }}>Restaurante</div>
+                <div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+                  {new Date(ticketOrder.created_at).toLocaleString("es-AR")}
+                </div>
+              </div>
+              <div style={{ borderTop: "1px dashed #aaa", borderBottom: "1px dashed #aaa", padding: "8px 0", margin: "8px 0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Mesa:</span><strong>{ticketOrder.table_number ?? "—"}</strong>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Cliente:</span><strong>{ticketOrder.customer_name}</strong>
+                </div>
+              </div>
+              {ticketOrder.notes ? (
+                <div style={{ margin: "6px 0", padding: "6px 8px", background: "#fefce8", border: "1px solid #fde68a", borderRadius: 6 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#92400e", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 }}>Observaciones</div>
+                  <div style={{ fontSize: 12, color: "#451a03" }}>{ticketOrder.notes}</div>
+                </div>
+              ) : null}
+              <div style={{ margin: "8px 0" }}>
+                {ticketOrder.order_items.map((item, idx) => (
+                  <div key={idx} style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                    <span>{item.quantity} × {item.item_name}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ borderTop: "1px dashed #aaa", marginTop: 8, paddingTop: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 15 }}>
+                  <span>TOTAL</span><span>${ticketOrder.total_ars}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12 }}>
+                  <span>Medio de pago:</span><span style={{ textTransform: "capitalize" }}>{ticketOrder.payment_method}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                  <span>Estado de pago:</span>
+                  <span style={{ fontWeight: 600, color: ticketOrder.payment_status === "pagado" ? "#16a34a" : "#dc2626" }}>
+                    {ticketOrder.payment_status === "pagado" ? "PAGADO" : "PENDIENTE"}
+                  </span>
+                </div>
+              </div>
+              <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "#888" }}>
+                ¡Gracias por su visita!
+              </div>
+            </div>
+            <div style={{ padding: "12px 16px", borderTop: "1px solid #e5e7eb", display: "flex", gap: 8 }}>
+              <button
+                onClick={() => setTicketOrder(null)}
+                style={{ flex: 1, background: "#f3f4f6", border: "1px solid #e5e7eb", color: "#374151", borderRadius: 8, padding: "9px 12px", cursor: "pointer", fontFamily: "inherit" }}
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  console.info("[ticket print]", { orderId: ticketOrder.id, table: ticketOrder.table_number });
+                  window.print();
+                }}
+                style={{ flex: 1, background: "#111", border: "none", color: "#fff", borderRadius: 8, padding: "9px 12px", cursor: "pointer", fontWeight: 600, fontFamily: "inherit" }}
+              >
+                🖨 Imprimir
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
