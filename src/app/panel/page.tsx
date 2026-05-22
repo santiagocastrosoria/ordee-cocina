@@ -18,7 +18,7 @@ type OrderRow = {
   payment_method: string;
   total_ars: number;
   created_at: string;
-  order_items: Array<{ item_name: string; quantity: number }>;
+  order_items: Array<{ item_name: string; quantity: number; unit_price_ars: number }>;
 };
 
 type Metrics = {
@@ -679,11 +679,22 @@ export default function PanelPage() {
                 </div>
               ) : null}
               <div style={{ margin: "8px 0" }}>
-                {ticketOrder.order_items.map((item, idx) => (
-                  <div key={idx} style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                    <span>{item.quantity} × {item.item_name}</span>
-                  </div>
-                ))}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "2px 8px", fontSize: 13 }}>
+                  {ticketOrder.order_items.map((item, idx) => {
+                    const subtotal = item.quantity * (item.unit_price_ars ?? 0);
+                    console.info("[ticket item totals rendered]", { item: item.item_name, qty: item.quantity, unit: item.unit_price_ars, subtotal });
+                    return (
+                      <>
+                        <span key={`name-${idx}`} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {item.quantity} × {item.item_name}
+                        </span>
+                        <span key={`price-${idx}`} style={{ textAlign: "right", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                          {item.unit_price_ars ? `$${subtotal.toLocaleString("es-AR")}` : ""}
+                        </span>
+                      </>
+                    );
+                  })}
+                </div>
               </div>
               <div style={{ borderTop: "1px dashed #aaa", marginTop: 8, paddingTop: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 15 }}>
