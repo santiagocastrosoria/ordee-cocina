@@ -78,8 +78,13 @@ export default function PanelPage() {
   const [helpRequests, setHelpRequests] = useState<HelpRow[]>([]);
   const [newTable, setNewTable] = useState("21");
   const [ticketOrder, setTicketOrder] = useState<OrderRow | null>(null);
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminInput, setAdminInput] = useState("");
+  const [adminError, setAdminError] = useState("");
 
   const restaurantParam = encodeURIComponent(getDefaultRestaurantSlug());
+  const ADMIN_VIEWS: ViewKey[] = ["dueno", "menu", "mesas"];
+  const ADMIN_PASS = "123456789";
 
   const fetchOrders = async () => {
     const response = await fetch(`/api/staff/orders?restaurant=${restaurantParam}`, { cache: "no-store" });
@@ -141,6 +146,11 @@ export default function PanelPage() {
       return;
     }
     setStaffName(session.name);
+
+    if (localStorage.getItem("ordee_admin_auth") === "1") {
+      console.info("[admin auth] session restored from localStorage");
+      setAdminUnlocked(true);
+    }
 
     fetchOrders();
     fetchMetrics();
@@ -263,6 +273,31 @@ export default function PanelPage() {
     router.replace("/");
   };
 
+  const adminLogin = () => {
+    if (adminInput.trim() === ADMIN_PASS) {
+      localStorage.setItem("ordee_admin_auth", "1");
+      setAdminUnlocked(true);
+      setAdminError("");
+      setAdminInput("");
+      console.info("[admin auth] access granted");
+    } else {
+      setAdminError("Contraseña incorrecta");
+      console.info("[admin auth] failed attempt");
+    }
+  };
+
+  const adminLogout = () => {
+    localStorage.removeItem("ordee_admin_auth");
+    setAdminUnlocked(false);
+    setView("cocina");
+    console.info("[admin auth] session closed");
+  };
+
+  const openTicket = (order: OrderRow) => {
+    console.info("[ticket print]", { orderId: order.id, table: order.table_number, method: order.payment_method });
+    setTicketOrder(order);
+  };
+
   return (
     <main style={{ maxWidth: 1400 }}>
       <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", gap: 16 }}>
@@ -271,11 +306,27 @@ export default function PanelPage() {
           <p style={{ fontSize: 13, opacity: 0.8 }}>Bienvenido/a {staffName}</p>
           <div style={{ display: "grid", gap: 8 }}>
             {(Object.keys(viewLabel) as ViewKey[]).map((key) => (
-              <button key={key} type="button" onClick={() => setView(key)} style={{ textAlign: "left", opacity: view === key ? 1 : 0.8 }}>
-                {viewLabel[key]}
+              <button
+                key={key}
+                type="button"
+                onClick={() => setView(key as ViewKey)}
+                style={{ textAlign: "left", opacity: view === key ? 1 : 0.75 }}
+              >
+                {ADMIN_VIEWS.includes(key as ViewKey) && !adminUnlocked ? "🔒 " : null}
+                {viewLabel[key as ViewKey]}
               </button>
             ))}
           </div>
+
+          {adminUnlocked ? (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #3f3f46" }}>
+              <p style={{ fontSize: 11, color: "#4ade80", margin: "0 0 6px", opacity: 0.9 }}>✓ Modo admin activo</p>
+              <button type="button" onClick={adminLogout} style={{ width: "100%", fontSize: 12, textAlign: "left", opacity: 0.7 }}>
+                Cerrar sesión admin
+              </button>
+            </div>
+          ) : null}
+
           <button type="button" onClick={logout} style={{ marginTop: 12 }}>
             Salir
           </button>
@@ -368,19 +419,14 @@ export default function PanelPage() {
                             ✓ Marcar como pagado
                           </button>
                         ) : null}
-                        <div style={{ display: "grid", gap: 6, gridTemplateColumns: isCash ? "1fr 1fr" : "1fr", marginTop: 6 }}>
-                          {isCash ? (
-                            <button
-                              type="button"
-                              style={{ fontSize: 12 }}
-                              onClick={() => {
-                                console.info("[ticket print]", { orderId: order.id });
-                                setTicketOrder(order);
-                              }}
-                            >
-                              🖨 Imprimir ticket
-                            </button>
-                          ) : null}
+                        <div style={{ display: "grid", gap: 6, gridTemplateColumns: "1fr 1fr", marginTop: 6 }}>
+                          <button
+                            type="button"
+                            style={{ fontSize: 12 }}
+                            onClick={() => openTicket(order)}
+                          >
+                            🖨 Imprimir ticket
+                          </button>
                           <button
                             type="button"
                             style={{ fontSize: 12, background: "#3f1515", borderColor: "#7f1d1d" }}
@@ -409,9 +455,14 @@ export default function PanelPage() {
                 <div style={{ display: "grid", gap: 8 }}>
                   {historialPedidos.length === 0 ? <p style={{ opacity: 0.8 }}>Sin pedidos entregados.</p> : null}
                   {historialPedidos.map((order) => (
-                    <div key={order.id} className="card" style={{ opacity: 0.9 }}>
-                      <strong>{order.customer_name}</strong> · Mesa {order.table_number ?? "—"} ·{" "}
-                      {new Date(order.created_at).toLocaleString("es-AR")} · ${order.total_ars}
+                    <div key={order.id} className="card" style={{ opacity: 0.9, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                      <span>
+                        <strong>{order.customer_name}</strong> · Mesa {order.table_number ?? "—"} ·{" "}
+                        {new Date(order.created_at).toLocaleString("es-AR")} · ${order.total_ars.toLocaleString("es-AR")}
+                      </span>
+                      <button type="button" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => openTicket(order)}>
+                        🖨 Ticket
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -431,7 +482,7 @@ export default function PanelPage() {
                   <strong>{order.customer_name}</strong> · Mesa {order.table_number ?? "-"} · ${order.total_ars}
                   <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
                     <button onClick={() => updateOrder(order.id, { paymentStatus: "pagado" })}>Marcar pago manual</button>
-                    <button onClick={() => window.print()}>Reimprimir ticket</button>
+                    <button onClick={() => openTicket(order)}>🖨 Imprimir ticket</button>
                     <button
                       onClick={() => {
                         if (!window.confirm("¿Estás seguro de eliminar el pedido?")) return;
@@ -446,14 +497,67 @@ export default function PanelPage() {
 
               <h3>Pedidos cobrados</h3>
               {paidOrders.map((order) => (
-                <div key={order.id} className="card" style={{ marginBottom: 8 }}>
-                  {order.customer_name} · ${order.total_ars} · {order.payment_method}
+                <div key={order.id} className="card" style={{ marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                  <span>
+                    {order.customer_name} · Mesa {order.table_number ?? "—"} · ${order.total_ars.toLocaleString("es-AR")} · {order.payment_method === "mercado_pago" ? "Mercado Pago" : order.payment_method}
+                  </span>
+                  <button type="button" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => openTicket(order)}>
+                    🖨 Ticket
+                  </button>
                 </div>
               ))}
             </div>
           ) : null}
 
-          {view === "dueno" ? (
+          {ADMIN_VIEWS.includes(view) && !adminUnlocked ? (
+            <div
+              style={{
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                minHeight: 320, gap: 0
+              }}
+            >
+              <div
+                style={{
+                  background: "#1c1c1f", border: "1px solid #3f3f46", borderRadius: 14, padding: "32px 28px",
+                  maxWidth: 360, width: "100%", display: "flex", flexDirection: "column", gap: 16, textAlign: "center"
+                }}
+              >
+                <div style={{ fontSize: 36 }}>🔒</div>
+                <div>
+                  <p style={{ fontWeight: 700, fontSize: 17, margin: "0 0 4px" }}>Acceso restringido</p>
+                  <p style={{ fontSize: 13, opacity: 0.65, margin: 0 }}>Esta sección requiere contraseña de administrador.</p>
+                </div>
+                <input
+                  type="password"
+                  placeholder="Contraseña"
+                  value={adminInput}
+                  autoFocus
+                  onChange={(e) => { setAdminInput(e.target.value); setAdminError(""); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") adminLogin(); }}
+                  style={{ textAlign: "center", fontSize: 16, letterSpacing: 4, padding: "10px 14px" }}
+                />
+                {adminError ? (
+                  <p style={{ color: "#f87171", margin: 0, fontSize: 13 }}>{adminError}</p>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={adminLogin}
+                  style={{ background: "#f4f4f5", color: "#0a0a0a", border: "none", fontWeight: 700, padding: "11px 0", fontSize: 15, borderRadius: 8 }}
+                >
+                  Ingresar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setView("cocina"); setAdminInput(""); setAdminError(""); }}
+                  style={{ background: "none", border: "none", opacity: 0.5, fontSize: 13, padding: 0, cursor: "pointer", color: "inherit" }}
+                >
+                  Volver a cocina
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {view === "dueno" && adminUnlocked ? (
             <div style={{ display: "grid", gap: 10 }}>
               <p>Facturacion diaria: ${metrics?.dailyRevenue ?? 0}</p>
               <p>Facturacion semanal: ${metrics?.weeklyRevenue ?? 0}</p>
@@ -488,7 +592,7 @@ export default function PanelPage() {
             </div>
           ) : null}
 
-          {view === "menu" ? (
+          {view === "menu" && adminUnlocked ? (
             <div>
               <button
                 onClick={async () => {
@@ -578,7 +682,7 @@ export default function PanelPage() {
             </div>
           ) : null}
 
-          {view === "mesas" ? (
+          {view === "mesas" && adminUnlocked ? (
             <div>
               <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                 <input value={newTable} onChange={(event) => setNewTable(event.target.value)} />
@@ -698,16 +802,29 @@ export default function PanelPage() {
               </div>
               <div style={{ borderTop: "1px dashed #aaa", marginTop: 8, paddingTop: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 15 }}>
-                  <span>TOTAL</span><span>${ticketOrder.total_ars}</span>
+                  <span>TOTAL</span>
+                  <span>${ticketOrder.total_ars.toLocaleString("es-AR")}</span>
                 </div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12 }}>
-                  <span>Medio de pago:</span><span style={{ textTransform: "capitalize" }}>{ticketOrder.payment_method}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                  <span>Estado de pago:</span>
-                  <span style={{ fontWeight: 600, color: ticketOrder.payment_status === "pagado" ? "#16a34a" : "#dc2626" }}>
-                    {ticketOrder.payment_status === "pagado" ? "PAGADO" : "PENDIENTE"}
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 12 }}>
+                  <span>Medio de pago:</span>
+                  <span style={{ fontWeight: 600 }}>
+                    {ticketOrder.payment_method === "mercado_pago"
+                      ? "Mercado Pago"
+                      : ticketOrder.payment_method === "efectivo"
+                        ? "Efectivo"
+                        : ticketOrder.payment_method}
                   </span>
+                </div>
+                <div style={{ marginTop: 8, textAlign: "center" }}>
+                  {ticketOrder.payment_method !== "mercado_pago" && ticketOrder.payment_status !== "pagado" ? (
+                    <span style={{ display: "inline-block", background: "#dc2626", color: "#fff", fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 6, letterSpacing: 0.5 }}>
+                      COBRAR EN EFECTIVO
+                    </span>
+                  ) : (
+                    <span style={{ display: "inline-block", background: "#16a34a", color: "#fff", fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 6, letterSpacing: 0.5 }}>
+                      PAGADO
+                    </span>
+                  )}
                 </div>
               </div>
               <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "#888" }}>
