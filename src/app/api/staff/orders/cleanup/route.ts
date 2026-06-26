@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ensureRestaurantBySlug, getDefaultRestaurantSlug } from "@/lib/restaurant-demo";
+import { resolveRestaurantFromRequest } from "@/lib/resolve-restaurant";
 import { createSupabaseAdmin } from "@/lib/supabase-admin";
 
 /**
@@ -12,14 +12,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Accion invalida" }, { status: 400 });
   }
 
-  const supabase = createSupabaseAdmin();
-  const slug = getDefaultRestaurantSlug();
-  const ensured = await ensureRestaurantBySlug(supabase, slug);
-  if (!ensured.ok) {
-    return NextResponse.json({ error: ensured.message }, { status: 500 });
+  const restaurant = await resolveRestaurantFromRequest(request);
+  if (!restaurant) {
+    return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
   }
 
-  const { error } = await supabase.from("orders").delete().eq("restaurant_id", ensured.id).eq("status", "entregado");
+  const supabase = createSupabaseAdmin();
+  const { error } = await supabase
+    .from("orders")
+    .delete()
+    .eq("restaurant_id", restaurant.id)
+    .eq("status", "entregado");
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

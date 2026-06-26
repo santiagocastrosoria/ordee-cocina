@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ensureRestaurantBySlug, getDefaultRestaurantSlug } from "@/lib/restaurant-demo";
+import { resolveRestaurantBySlug, resolveRestaurantFromRequest } from "@/lib/resolve-restaurant";
 import { createSupabaseAdmin } from "@/lib/supabase-admin";
 
 interface MenuMutationBody {
@@ -8,32 +8,29 @@ interface MenuMutationBody {
   name?: string;
   description?: string;
   price_ars?: number;
-  category_code?: "entrada" | "principal" | "bebida" | "postre";
+  category_code?: string;
   is_active?: boolean;
   image_url?: string;
   category_name?: string;
 }
 
-async function getRestaurantAndCategories(supabase: ReturnType<typeof createSupabaseAdmin>) {
-  const slug = getDefaultRestaurantSlug();
-  const ensured = await ensureRestaurantBySlug(supabase, slug);
-  if (!ensured.ok) {
-    console.error("[ORDEE-COCINA staff/menu] ensure restaurant:", ensured.message);
-    return null;
-  }
-  const restaurant = { id: ensured.id };
-  if (ensured.created) {
-    console.info("[ORDEE-COCINA staff/menu] restaurant creado restaurant_id=", ensured.id);
-  }
+async function getRestaurantAndCategories(supabase: ReturnType<typeof createSupabaseAdmin>, slug: string) {
+  const restaurant = await resolveRestaurantBySlug(slug);
+  if (!restaurant) return null;
 
   const { data: categories } = await supabase.from("menu_categories").select("id,code").eq("restaurant_id", restaurant.id);
   return { restaurant, categories: categories ?? [] };
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const slug = request.nextUrl.searchParams.get("restaurant");
+  if (!slug) {
+    return NextResponse.json({ error: "Falta restaurant" }, { status: 400 });
+  }
+
   const supabase = createSupabaseAdmin();
-  const context = await getRestaurantAndCategories(supabase);
-  if (!context) return NextResponse.json([], { status: 200 });
+  const context = await getRestaurantAndCategories(supabase, slug);
+  if (!context) return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
 
   const { data } = await supabase
     .from("menu_items")
@@ -54,8 +51,12 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   const body = (await request.json()) as MenuMutationBody;
   const supabase = createSupabaseAdmin();
-  const context = await getRestaurantAndCategories(supabase);
+  const restaurant = await resolveRestaurantFromRequest(request);
+  if (!restaurant) {
+    return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
+  }
 
+  const context = await getRestaurantAndCategories(supabase, restaurant.slug);
   if (!context) {
     return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
   }
@@ -79,6 +80,16 @@ export async function POST(request: NextRequest) {
 
   if (body.action === "update") {
     if (!body.id) return NextResponse.json({ error: "Falta id" }, { status: 400 });
+
+    const { data: existing } = await supabase
+      .from("menu_items")
+      .select("restaurant_id")
+      .eq("id", body.id)
+      .maybeSingle();
+    if (!existing || existing.restaurant_id !== context.restaurant.id) {
+      return NextResponse.json({ error: "Producto no encontrado" }, { status: 404 });
+    }
+
     const patch: Record<string, string | number> = {};
     if (body.name) patch.name = body.name;
     if (typeof body.description === "string") patch.description = body.description;
@@ -99,12 +110,31 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Falta info para activar/desactivar" }, { status: 400 });
     }
 
+    const { data: existing } = await supabase
+      .from("menu_items")
+      .select("restaurant_id")
+      .eq("id", body.id)
+      .maybeSingle();
+    if (!existing || existing.restaurant_id !== context.restaurant.id) {
+      return NextResponse.json({ error: "Producto no encontrado" }, { status: 404 });
+    }
+
     const { error } = await supabase.from("menu_items").update({ is_active: body.is_active }).eq("id", body.id);
     if (error) return NextResponse.json({ error: "No se pudo cambiar estado" }, { status: 500 });
   }
 
   if (body.action === "delete") {
     if (!body.id) return NextResponse.json({ error: "Falta id" }, { status: 400 });
+
+    const { data: existing } = await supabase
+      .from("menu_items")
+      .select("restaurant_id")
+      .eq("id", body.id)
+      .maybeSingle();
+    if (!existing || existing.restaurant_id !== context.restaurant.id) {
+      return NextResponse.json({ error: "Producto no encontrado" }, { status: 404 });
+    }
+
     const { error } = await supabase.from("menu_items").delete().eq("id", body.id);
     if (error) return NextResponse.json({ error: "No se pudo eliminar" }, { status: 500 });
   }

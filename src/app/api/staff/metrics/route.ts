@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ensureRestaurantBySlug, getDefaultRestaurantSlug } from "@/lib/restaurant-demo";
+import { resolveRestaurantFromRequest } from "@/lib/resolve-restaurant";
 import { createSupabaseAdmin } from "@/lib/supabase-admin";
 
 type OrderRow = {
@@ -18,15 +18,12 @@ type OrderItemRow = {
 };
 
 export async function GET(request: NextRequest) {
-  const restaurantSlug = request.nextUrl.searchParams.get("restaurant") ?? getDefaultRestaurantSlug();
-  const supabase = createSupabaseAdmin();
-
-  const ensured = await ensureRestaurantBySlug(supabase, restaurantSlug);
-  if (!ensured.ok) {
-    console.error("[ORDEE-COCINA staff/metrics] ensure:", ensured.message);
-    return NextResponse.json({ error: ensured.message }, { status: 500 });
+  const restaurant = await resolveRestaurantFromRequest(request);
+  if (!restaurant) {
+    return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
   }
-  const restaurant = { id: ensured.id };
+
+  const supabase = createSupabaseAdmin();
 
   const { data: orders } = await supabase
     .from("orders")

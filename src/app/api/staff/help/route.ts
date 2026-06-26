@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ensureRestaurantBySlug, getDefaultRestaurantSlug } from "@/lib/restaurant-demo";
+import { resolveRestaurantFromRequest } from "@/lib/resolve-restaurant";
 import { createSupabaseAdmin } from "@/lib/supabase-admin";
 
-export async function GET() {
-  const supabase = createSupabaseAdmin();
-  const slug = getDefaultRestaurantSlug();
-  const ensured = await ensureRestaurantBySlug(supabase, slug);
-  if (!ensured.ok) {
-    console.error("[ORDEE-COCINA staff/help GET] ensure:", ensured.message);
-    return NextResponse.json({ error: ensured.message }, { status: 500 });
+export async function GET(request: NextRequest) {
+  const restaurant = await resolveRestaurantFromRequest(request);
+  if (!restaurant) {
+    return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
   }
-  const restaurant = { id: ensured.id };
+
+  const supabase = createSupabaseAdmin();
 
   const { data, error } = await supabase
     .from("help_requests")
@@ -25,10 +23,26 @@ export async function GET() {
 }
 
 export async function PATCH(request: NextRequest) {
+  const restaurant = await resolveRestaurantFromRequest(request);
+  if (!restaurant) {
+    return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
+  }
+
   const body = (await request.json()) as { id: string };
   if (!body.id) return NextResponse.json({ error: "Falta id" }, { status: 400 });
 
   const supabase = createSupabaseAdmin();
+
+  const { data: row } = await supabase
+    .from("help_requests")
+    .select("id,restaurant_id")
+    .eq("id", body.id)
+    .maybeSingle();
+
+  if (!row || row.restaurant_id !== restaurant.id) {
+    return NextResponse.json({ error: "Solicitud no encontrada" }, { status: 404 });
+  }
+
   const { error } = await supabase.from("help_requests").update({ status: "resuelto" }).eq("id", body.id);
 
   if (error) return NextResponse.json({ error: "No se pudo resolver" }, { status: 500 });
