@@ -1,6 +1,6 @@
-import { PanelScreen } from "@/components/panel-screen";
+import { LazyPanelScreen } from "@/lib/lazy-screens";
 import { getDefaultRestaurantSlug } from "@/lib/restaurant-demo";
 
 export default function PanelPage() {
-  return <PanelScreen restaurantSlug={getDefaultRestaurantSlug()} basePath="" />;
+  return <LazyPanelScreen restaurantSlug={getDefaultRestaurantSlug()} />;
 }

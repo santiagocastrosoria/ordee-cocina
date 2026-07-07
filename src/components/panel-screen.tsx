@@ -1,10 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { displayNameForRestaurantSlug } from "@/lib/restaurant-demo";
 import { staffPaths } from "@/lib/restaurant-routes";
-import { clearStaffSession, getStaffSessionForSlug } from "@/lib/session";
+import { loadStaffProfile, signOutStaff, staffFetch, verifyStaffRestaurantAccess, type StaffRole } from "@/lib/staff-client";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type ViewKey = "cocina" | "caja" | "dueno" | "menu" | "mesas";
@@ -70,13 +70,13 @@ const viewLabel: Record<ViewKey, string> = {
 
 interface PanelScreenProps {
   restaurantSlug: string;
-  basePath: string;
 }
 
-export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
+export function PanelScreen({ restaurantSlug }: PanelScreenProps) {
   const router = useRouter();
   const [view, setView] = useState<ViewKey>("cocina");
   const [staffName, setStaffName] = useState("Staff");
+  const [staffRole, setStaffRole] = useState<StaffRole | null>(null);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [menuItems, setMenuItems] = useState<MenuItemRow[]>([]);
@@ -84,20 +84,29 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
   const [helpRequests, setHelpRequests] = useState<HelpRow[]>([]);
   const [newTable, setNewTable] = useState("21");
   const [ticketOrder, setTicketOrder] = useState<OrderRow | null>(null);
-  const [adminUnlocked, setAdminUnlocked] = useState(false);
-  const [adminInput, setAdminInput] = useState("");
-  const [adminError, setAdminError] = useState("");
   const [restaurantId, setRestaurantId] = useState<string | null>(null);
+
+  const viewRef = useRef<ViewKey>(view);
+  const helpIdsRef = useRef<Set<string>>(new Set());
+  const helpAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
 
   const restaurantParam = encodeURIComponent(restaurantSlug);
   const restaurantQuery = `?restaurant=${restaurantParam}`;
   const paths = staffPaths(restaurantSlug);
   const restaurantName = displayNameForRestaurantSlug(restaurantSlug);
   const ADMIN_VIEWS: ViewKey[] = ["dueno", "menu", "mesas"];
-  const ADMIN_PASS = "123456789";
+  const isDueno = staffRole === "dueno";
 
   const fetchOrders = useCallback(async () => {
-    const response = await fetch(`/api/staff/orders${restaurantQuery}`, { cache: "no-store" });
+    const response = await staffFetch(`/api/staff/orders${restaurantQuery}`);
+    if (!response) {
+      router.replace(paths.login);
+      return;
+    }
     if (!response.ok) {
       const t = await response.text();
       console.error("[ORDEE-COCINA] fetchOrders FALLA HTTP", response.status, t.slice(0, 500));
@@ -112,10 +121,11 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
       console.info("[notes received kitchen]", withNotes.map((o) => ({ id: o.id, notes: o.notes })));
     }
     setOrders(data);
-  }, [restaurantQuery]);
+  }, [restaurantQuery, router, paths.login]);
 
   const fetchMetrics = useCallback(async () => {
-    const response = await fetch(`/api/staff/metrics${restaurantQuery}`, { cache: "no-store" });
+    const response = await staffFetch(`/api/staff/metrics${restaurantQuery}`);
+    if (!response) return;
     if (!response.ok) {
       const t = await response.text();
       console.error("[ORDEE-COCINA] fetchMetrics FALLA HTTP", response.status, t.slice(0, 500));
@@ -125,19 +135,20 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
   }, [restaurantQuery]);
 
   const fetchMenu = useCallback(async () => {
-    const response = await fetch(`/api/staff/menu${restaurantQuery}`, { cache: "no-store" });
-    if (!response.ok) return;
+    const response = await staffFetch(`/api/staff/menu${restaurantQuery}`);
+    if (!response || !response.ok) return;
     setMenuItems((await response.json()) as MenuItemRow[]);
   }, [restaurantQuery]);
 
   const fetchTables = useCallback(async () => {
-    const response = await fetch(`/api/staff/tables${restaurantQuery}`, { cache: "no-store" });
-    if (!response.ok) return;
+    const response = await staffFetch(`/api/staff/tables${restaurantQuery}`);
+    if (!response || !response.ok) return;
     setTables((await response.json()) as TableRow[]);
   }, [restaurantQuery]);
 
   const fetchHelp = useCallback(async () => {
-    const response = await fetch(`/api/staff/help${restaurantQuery}`, { cache: "no-store" });
+    const response = await staffFetch(`/api/staff/help${restaurantQuery}`);
+    if (!response) return;
     if (!response.ok) {
       const t = await response.text();
       console.error("[ORDEE-COCINA] fetchHelp FALLA HTTP", response.status, t.slice(0, 500));
@@ -145,39 +156,81 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
     }
     const data = (await response.json()) as HelpRow[];
     setHelpRequests(data);
-    if (data.length > 0) {
-      const audio = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
-      audio.play().catch(() => undefined);
+
+    const nextIds = new Set(data.map((row) => row.id));
+    let hasNew = false;
+    for (const id of nextIds) {
+      if (!helpIdsRef.current.has(id)) {
+        hasNew = true;
+        break;
+      }
+    }
+    helpIdsRef.current = nextIds;
+
+    if (hasNew) {
+      if (!helpAudioRef.current) {
+        helpAudioRef.current = new Audio(
+          "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
+        );
+      }
+      helpAudioRef.current.play().catch(() => undefined);
     }
   }, [restaurantQuery]);
 
   useEffect(() => {
-    const session = getStaffSessionForSlug(restaurantSlug);
-    if (!session) {
-      router.replace(paths.login);
-      return;
-    }
-    setStaffName(session.name);
+    let cancelled = false;
 
-    if (localStorage.getItem("ordee_admin_auth") === "1") {
-      console.info("[admin auth] session restored from localStorage");
-      setAdminUnlocked(true);
-    }
+    (async () => {
+      const profile = await loadStaffProfile(restaurantSlug);
+      if (cancelled) return;
+      if (!profile) {
+        router.replace(paths.login);
+        return;
+      }
+
+      const ok = await verifyStaffRestaurantAccess(restaurantSlug);
+      if (cancelled) return;
+      if (!ok) {
+        await signOutStaff();
+        router.replace(paths.login);
+        return;
+      }
+
+      setStaffName(profile.full_name ?? "Staff");
+      setStaffRole(profile.role);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router, restaurantSlug, paths.login]);
+
+  useEffect(() => {
+    if (!staffRole) return;
 
     fetchOrders();
-    fetchMetrics();
-    fetchMenu();
-    fetchTables();
     fetchHelp();
 
-    const interval = window.setInterval(() => {
+    const poll = () => {
+      if (document.visibilityState !== "visible") return;
       fetchOrders();
-      fetchMetrics();
       fetchHelp();
-    }, 2000);
+      if (viewRef.current === "dueno") fetchMetrics();
+    };
 
-    return () => window.clearInterval(interval);
-  }, [router, restaurantSlug, paths.login, fetchOrders, fetchMetrics, fetchMenu, fetchTables, fetchHelp]);
+    poll();
+    const interval = window.setInterval(poll, 2000);
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") poll();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [staffRole, fetchOrders, fetchMetrics, fetchHelp]);
 
   useEffect(() => {
     const supabase = getSupabaseBrowserClient();
@@ -191,17 +244,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
       .on("postgres_changes", { event: "*", schema: "public", table: "orders", filter }, (payload) => {
         console.info("[ORDEE-COCINA realtime] orders", payload.eventType, payload);
         fetchOrders();
-        fetchMetrics();
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "order_items" }, (payload) => {
-        console.info("[ORDEE-COCINA realtime] order_items", payload.eventType);
-        fetchOrders();
-        fetchMetrics();
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "payments" }, (payload) => {
-        console.info("[ORDEE-COCINA realtime] payments", payload.eventType);
-        fetchOrders();
-        fetchMetrics();
+        if (viewRef.current === "dueno") fetchMetrics();
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "help_requests", filter }, (payload) => {
         console.info("[ORDEE-COCINA realtime] help_requests", payload.eventType);
@@ -228,6 +271,18 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
     };
   }, [restaurantId, fetchOrders, fetchMetrics, fetchHelp, fetchMenu, fetchTables]);
 
+  useEffect(() => {
+    if (view === "dueno" && metrics === null) fetchMetrics();
+  }, [view, metrics, fetchMetrics]);
+
+  useEffect(() => {
+    if (view === "menu" && menuItems.length === 0) fetchMenu();
+  }, [view, menuItems.length, fetchMenu]);
+
+  useEffect(() => {
+    if (view === "mesas" && tables.length === 0) fetchTables();
+  }, [view, tables.length, fetchTables]);
+
   const pendingOrders = useMemo(() => orders.filter((order) => order.payment_status !== "pagado"), [orders]);
   const paidOrders = useMemo(() => orders.filter((order) => order.payment_status === "pagado"), [orders]);
 
@@ -250,8 +305,18 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
     [orders]
   );
 
+  const resolveHelpRequest = async (helpId: string) => {
+    await staffFetch(`/api/staff/help${restaurantQuery}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: helpId })
+    });
+    await fetchHelp();
+  };
+
   const deleteOrder = (id: string) => {
-    void fetch(`/api/staff/orders/${id}${restaurantQuery}`, { method: "DELETE" }).then(() => {
+    void staffFetch(`/api/staff/orders/${id}${restaurantQuery}`, { method: "DELETE" }).then((response) => {
+      if (!response?.ok) return;
       fetchOrders();
       fetchMetrics();
     });
@@ -259,12 +324,12 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
 
   const clearHistorialEntregados = () => {
     if (!window.confirm("¿Borrar todos los pedidos entregados del historial? No se puede deshacer.")) return;
-    void fetch(`/api/staff/orders/cleanup${restaurantQuery}`, {
+    void staffFetch(`/api/staff/orders/cleanup${restaurantQuery}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "delivered" })
-    }).then(async (res) => {
-      if (!res.ok) {
+    }).then(async (response) => {
+      if (!response?.ok) {
         window.alert("No se pudo limpiar el historial");
         return;
       }
@@ -274,7 +339,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
   };
 
   const updateOrder = async (id: string, patch: { status?: OrderRow["status"]; paymentStatus?: OrderRow["payment_status"]; cancelReason?: string }) => {
-    await fetch(`/api/staff/orders/${id}${restaurantQuery}`, {
+    await staffFetch(`/api/staff/orders/${id}${restaurantQuery}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch)
@@ -283,29 +348,9 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
     fetchMetrics();
   };
 
-  const logout = () => {
-    clearStaffSession();
+  const logout = async () => {
+    await signOutStaff();
     router.replace(paths.login);
-  };
-
-  const adminLogin = () => {
-    if (adminInput.trim() === ADMIN_PASS) {
-      localStorage.setItem("ordee_admin_auth", "1");
-      setAdminUnlocked(true);
-      setAdminError("");
-      setAdminInput("");
-      console.info("[admin auth] access granted");
-    } else {
-      setAdminError("Contraseña incorrecta");
-      console.info("[admin auth] failed attempt");
-    }
-  };
-
-  const adminLogout = () => {
-    localStorage.removeItem("ordee_admin_auth");
-    setAdminUnlocked(false);
-    setView("cocina");
-    console.info("[admin auth] session closed");
   };
 
   const openTicket = (order: OrderRow) => {
@@ -328,18 +373,19 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                 onClick={() => setView(key as ViewKey)}
                 style={{ textAlign: "left", opacity: view === key ? 1 : 0.75 }}
               >
-                {ADMIN_VIEWS.includes(key as ViewKey) && !adminUnlocked ? "🔒 " : null}
+                {ADMIN_VIEWS.includes(key as ViewKey) && !isDueno ? "🔒 " : null}
                 {viewLabel[key as ViewKey]}
               </button>
             ))}
           </div>
 
-          {adminUnlocked ? (
+          {isDueno ? (
             <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #3f3f46" }}>
-              <p style={{ fontSize: 11, color: "#4ade80", margin: "0 0 6px", opacity: 0.9 }}>✓ Modo admin activo</p>
-              <button type="button" onClick={adminLogout} style={{ width: "100%", fontSize: 12, textAlign: "left", opacity: 0.7 }}>
-                Cerrar sesión admin
-              </button>
+              <p style={{ fontSize: 11, color: "#4ade80", margin: "0 0 6px", opacity: 0.9 }}>Rol: dueño</p>
+            </div>
+          ) : staffRole === "cocina" ? (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #3f3f46" }}>
+              <p style={{ fontSize: 11, color: "#a1a1aa", margin: 0, opacity: 0.9 }}>Rol: cocina</p>
             </div>
           ) : null}
 
@@ -357,7 +403,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
               {helpRequests.map((help) => (
                 <div key={help.id} style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
                   <span>Mesa {help.table_number ?? "sin dato"} necesita ayuda</span>
-                  <button onClick={() => fetch(`/api/staff/help${restaurantQuery}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: help.id }) }).then(fetchHelp)}>
+                  <button type="button" onClick={() => void resolveHelpRequest(help.id)}>
                     Resolver
                   </button>
                 </div>
@@ -525,7 +571,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
             </div>
           ) : null}
 
-          {ADMIN_VIEWS.includes(view) && !adminUnlocked ? (
+          {ADMIN_VIEWS.includes(view) && !isDueno ? (
             <div
               style={{
                 display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -541,30 +587,11 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                 <div style={{ fontSize: 36 }}>🔒</div>
                 <div>
                   <p style={{ fontWeight: 700, fontSize: 17, margin: "0 0 4px" }}>Acceso restringido</p>
-                  <p style={{ fontSize: 13, opacity: 0.65, margin: 0 }}>Esta sección requiere contraseña de administrador.</p>
+                  <p style={{ fontSize: 13, opacity: 0.65, margin: 0 }}>Esta sección requiere rol dueño.</p>
                 </div>
-                <input
-                  type="password"
-                  placeholder="Contraseña"
-                  value={adminInput}
-                  autoFocus
-                  onChange={(e) => { setAdminInput(e.target.value); setAdminError(""); }}
-                  onKeyDown={(e) => { if (e.key === "Enter") adminLogin(); }}
-                  style={{ textAlign: "center", fontSize: 16, letterSpacing: 4, padding: "10px 14px" }}
-                />
-                {adminError ? (
-                  <p style={{ color: "#f87171", margin: 0, fontSize: 13 }}>{adminError}</p>
-                ) : null}
                 <button
                   type="button"
-                  onClick={adminLogin}
-                  style={{ background: "#f4f4f5", color: "#0a0a0a", border: "none", fontWeight: 700, padding: "11px 0", fontSize: 15, borderRadius: 8 }}
-                >
-                  Ingresar
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setView("cocina"); setAdminInput(""); setAdminError(""); }}
+                  onClick={() => setView("cocina")}
                   style={{ background: "none", border: "none", opacity: 0.5, fontSize: 13, padding: 0, cursor: "pointer", color: "inherit" }}
                 >
                   Volver a cocina
@@ -573,7 +600,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
             </div>
           ) : null}
 
-          {view === "dueno" && adminUnlocked ? (
+          {view === "dueno" && isDueno ? (
             <div style={{ display: "grid", gap: 10 }}>
               <p>Facturacion diaria: ${metrics?.dailyRevenue ?? 0}</p>
               <p>Facturacion semanal: ${metrics?.weeklyRevenue ?? 0}</p>
@@ -608,7 +635,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
             </div>
           ) : null}
 
-          {view === "menu" && adminUnlocked ? (
+          {view === "menu" && isDueno ? (
             <div>
               <button
                 onClick={async () => {
@@ -617,7 +644,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                   const category = (window.prompt("Categoria: entrada/principal/bebida/postre") ?? "principal") as MenuItemRow["category_code"];
                   const imageUrl = window.prompt("URL de imagen gastronomica");
                   if (!name || Number.isNaN(price)) return;
-                  await fetch(`/api/staff/menu${restaurantQuery}`, {
+                  await staffFetch(`/api/staff/menu${restaurantQuery}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ action: "create", name, price_ars: price, category_code: category, image_url: imageUrl ?? undefined })
@@ -632,7 +659,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                   const code = (window.prompt("Codigo categoria (entrada/principal/bebida/postre)") ?? "") as MenuItemRow["category_code"];
                   const categoryName = window.prompt("Nombre categoria");
                   if (!code || !categoryName) return;
-                  await fetch(`/api/staff/menu${restaurantQuery}`, {
+                  await staffFetch(`/api/staff/menu${restaurantQuery}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ action: "create_category", category_code: code, category_name: categoryName })
@@ -657,7 +684,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                           if (!name) return;
                           const price = priceRaw != null && priceRaw !== "" ? Number(priceRaw) : item.price_ars;
                           if (Number.isNaN(price)) return;
-                          await fetch(`/api/staff/menu${restaurantQuery}`, {
+                          await staffFetch(`/api/staff/menu${restaurantQuery}`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({ action: "update", id: item.id, name, description: description ?? "", price_ars: price })
@@ -669,7 +696,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                       </button>
                       <button
                         onClick={async () => {
-                          await fetch(`/api/staff/menu${restaurantQuery}`, {
+                          await staffFetch(`/api/staff/menu${restaurantQuery}`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({ action: "toggle", id: item.id, is_active: !item.is_active })
@@ -681,7 +708,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                       </button>
                       <button
                         onClick={async () => {
-                          await fetch(`/api/staff/menu${restaurantQuery}`, {
+                          await staffFetch(`/api/staff/menu${restaurantQuery}`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({ action: "delete", id: item.id })
@@ -698,13 +725,13 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
             </div>
           ) : null}
 
-          {view === "mesas" && adminUnlocked ? (
+          {view === "mesas" && isDueno ? (
             <div>
               <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                 <input value={newTable} onChange={(event) => setNewTable(event.target.value)} />
                 <button
                   onClick={async () => {
-                    await fetch(`/api/staff/tables${restaurantQuery}`, {
+                    await staffFetch(`/api/staff/tables${restaurantQuery}`, {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ action: "create", table_number: newTable })
@@ -726,7 +753,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                       <button
                         key={status}
                         onClick={async () => {
-                          await fetch(`/api/staff/tables${restaurantQuery}`, {
+                          await staffFetch(`/api/staff/tables${restaurantQuery}`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({ action: "update", id: table.id, status })
@@ -739,7 +766,7 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                     ))}
                     <button
                       onClick={async () => {
-                        await fetch(`/api/staff/tables${restaurantQuery}`, {
+                        await staffFetch(`/api/staff/tables${restaurantQuery}`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({ action: "delete", id: table.id })
@@ -802,16 +829,15 @@ export function PanelScreen({ restaurantSlug, basePath }: PanelScreenProps) {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "2px 8px", fontSize: 13 }}>
                   {ticketOrder.order_items.map((item, idx) => {
                     const subtotal = item.quantity * (item.unit_price_ars ?? 0);
-                    console.info("[ticket item totals rendered]", { item: item.item_name, qty: item.quantity, unit: item.unit_price_ars, subtotal });
                     return (
-                      <>
-                        <span key={`name-${idx}`} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <Fragment key={`${item.item_name}-${idx}`}>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {item.quantity} × {item.item_name}
                         </span>
-                        <span key={`price-${idx}`} style={{ textAlign: "right", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                        <span style={{ textAlign: "right", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
                           {item.unit_price_ars ? `$${subtotal.toLocaleString("es-AR")}` : ""}
                         </span>
-                      </>
+                      </Fragment>
                     );
                   })}
                 </div>

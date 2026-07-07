@@ -1,7 +1,7 @@
-import { PanelScreen } from "@/components/panel-screen";
-import { staffBasePathForSlug } from "@/lib/restaurant-routes";
+import { LazyPanelScreen } from "@/lib/lazy-screens";
+import { getDefaultRestaurantSlug } from "@/lib/restaurant-demo";
 
 export default function RestaurantPanelPage({ params }: { params: { restaurantSlug: string } }) {
   const slug = decodeURIComponent(params.restaurantSlug).trim();
-  return <PanelScreen restaurantSlug={slug} basePath={staffBasePathForSlug(slug)} />;
+  return <LazyPanelScreen restaurantSlug={slug} />;
 }

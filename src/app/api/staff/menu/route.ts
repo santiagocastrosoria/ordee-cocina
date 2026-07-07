@@ -1,6 +1,10 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
-import { resolveRestaurantBySlug, resolveRestaurantFromRequest } from "@/lib/resolve-restaurant";
-import { createSupabaseAdmin } from "@/lib/supabase-admin";
+import { jsonError, parseJsonBody, safeClientDbMessage } from "@/lib/api/http";
+import { isUuid, sanitizeSlug, sanitizeText, validatePositivePrice } from "@/lib/api/sanitize";
+import { requireStaffAuth } from "@/lib/staff-auth";
+
+export const dynamic = "force-dynamic";
 
 interface MenuMutationBody {
   action: "create" | "update" | "toggle" | "delete" | "create_category";
@@ -14,29 +18,32 @@ interface MenuMutationBody {
   category_name?: string;
 }
 
-async function getRestaurantAndCategories(supabase: ReturnType<typeof createSupabaseAdmin>, slug: string) {
-  const restaurant = await resolveRestaurantBySlug(slug);
-  if (!restaurant) return null;
-
-  const { data: categories } = await supabase.from("menu_categories").select("id,code").eq("restaurant_id", restaurant.id);
-  return { restaurant, categories: categories ?? [] };
+async function getRestaurantAndCategories(client: SupabaseClient, restaurantId: string, slug: string) {
+  const { data: categories, error } = await client.from("menu_categories").select("id,code").eq("restaurant_id", restaurantId);
+  if (error) return null;
+  return {
+    restaurant: { id: restaurantId, slug },
+    categories: categories ?? []
+  };
 }
 
 export async function GET(request: NextRequest) {
-  const slug = request.nextUrl.searchParams.get("restaurant");
-  if (!slug) {
-    return NextResponse.json({ error: "Falta restaurant" }, { status: 400 });
-  }
+  const auth = await requireStaffAuth(request, "menu:read");
+  if (!auth.ok) return auth.response;
 
-  const supabase = createSupabaseAdmin();
-  const context = await getRestaurantAndCategories(supabase, slug);
-  if (!context) return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
+  const { ctx } = auth;
+  const context = await getRestaurantAndCategories(ctx.admin, ctx.restaurant.id, ctx.restaurant.slug);
+  if (!context) return jsonError("Restaurante no encontrado", 404);
 
-  const { data } = await supabase
+  const { data, error } = await ctx.admin
     .from("menu_items")
     .select("id,name,description,price_ars,is_active,image_url,category_id")
     .eq("restaurant_id", context.restaurant.id)
     .order("created_at", { ascending: true });
+
+  if (error) {
+    return jsonError("No se pudo cargar menu", 500, safeClientDbMessage("[staff/menu GET]", error));
+  }
 
   const categoryById = new Map(context.categories.map((cat) => [cat.id, cat.code]));
 
@@ -49,109 +56,133 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const body = (await request.json()) as MenuMutationBody;
-  const supabase = createSupabaseAdmin();
-  const restaurant = await resolveRestaurantFromRequest(request);
-  if (!restaurant) {
-    return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
-  }
+  const auth = await requireStaffAuth(request, "menu:write");
+  if (!auth.ok) return auth.response;
 
-  const context = await getRestaurantAndCategories(supabase, restaurant.slug);
+  const parsed = await parseJsonBody<MenuMutationBody>(request);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
+
+  const { ctx } = auth;
+  const context = await getRestaurantAndCategories(ctx.admin, ctx.restaurant.id, ctx.restaurant.slug);
   if (!context) {
-    return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
+    return jsonError("Restaurante no encontrado", 404);
   }
 
   if (body.action === "create") {
+    const name = sanitizeText(body.name, 120);
+    const price = validatePositivePrice(body.price_ars);
     const categoryId = context.categories.find((cat) => cat.code === body.category_code)?.id;
-    if (!categoryId || !body.name || !body.price_ars) {
-      return NextResponse.json({ error: "Faltan datos" }, { status: 400 });
+    if (!categoryId || !name || price === null) {
+      return jsonError("Faltan datos", 400);
     }
-    const { error } = await supabase.from("menu_items").insert({
+
+    const { error } = await ctx.admin.from("menu_items").insert({
       restaurant_id: context.restaurant.id,
       category_id: categoryId,
-      name: body.name,
-      description: body.description ?? "",
-      price_ars: body.price_ars,
-      image_url: body.image_url ?? null,
+      name,
+      description: sanitizeText(body.description, 500) ?? "",
+      price_ars: price,
+      image_url: sanitizeText(body.image_url, 500),
       is_active: true
     });
-    if (error) return NextResponse.json({ error: "No se pudo crear" }, { status: 500 });
+    if (error) return jsonError("No se pudo crear", 500, safeClientDbMessage("[staff/menu create]", error));
   }
 
   if (body.action === "update") {
-    if (!body.id) return NextResponse.json({ error: "Falta id" }, { status: 400 });
+    if (!isUuid(body.id)) return jsonError("Falta id", 400);
 
-    const { data: existing } = await supabase
+    const { data: existing, error: fetchError } = await ctx.admin
       .from("menu_items")
       .select("restaurant_id")
       .eq("id", body.id)
       .maybeSingle();
-    if (!existing || existing.restaurant_id !== context.restaurant.id) {
-      return NextResponse.json({ error: "Producto no encontrado" }, { status: 404 });
+    if (fetchError || !existing || existing.restaurant_id !== context.restaurant.id) {
+      return jsonError("Producto no encontrado", 404);
     }
 
-    const patch: Record<string, string | number> = {};
-    if (body.name) patch.name = body.name;
-    if (typeof body.description === "string") patch.description = body.description;
-    if (typeof body.price_ars === "number") patch.price_ars = body.price_ars;
-    if (typeof body.image_url === "string") patch.image_url = body.image_url;
+    const patch: Record<string, string | number | null> = {};
+    const name = sanitizeText(body.name, 120);
+    if (name) patch.name = name;
+    if (typeof body.description === "string") patch.description = sanitizeText(body.description, 500) ?? "";
+    const price = validatePositivePrice(body.price_ars);
+    if (price !== null) patch.price_ars = price;
+    if (typeof body.image_url === "string") patch.image_url = sanitizeText(body.image_url, 500);
 
     if (body.category_code) {
       const categoryId = context.categories.find((cat) => cat.code === body.category_code)?.id;
       if (categoryId) patch.category_id = categoryId;
     }
 
-    const { error } = await supabase.from("menu_items").update(patch).eq("id", body.id);
-    if (error) return NextResponse.json({ error: "No se pudo actualizar" }, { status: 500 });
+    if (Object.keys(patch).length === 0) {
+      return jsonError("Nada que actualizar", 400);
+    }
+
+    const { error } = await ctx.admin
+      .from("menu_items")
+      .update(patch)
+      .eq("id", body.id)
+      .eq("restaurant_id", context.restaurant.id);
+    if (error) return jsonError("No se pudo actualizar", 500, safeClientDbMessage("[staff/menu update]", error));
   }
 
   if (body.action === "toggle") {
-    if (!body.id || typeof body.is_active !== "boolean") {
-      return NextResponse.json({ error: "Falta info para activar/desactivar" }, { status: 400 });
+    if (!isUuid(body.id) || typeof body.is_active !== "boolean") {
+      return jsonError("Falta info para activar/desactivar", 400);
     }
 
-    const { data: existing } = await supabase
+    const { data: existing, error: fetchError } = await ctx.admin
       .from("menu_items")
       .select("restaurant_id")
       .eq("id", body.id)
       .maybeSingle();
-    if (!existing || existing.restaurant_id !== context.restaurant.id) {
-      return NextResponse.json({ error: "Producto no encontrado" }, { status: 404 });
+    if (fetchError || !existing || existing.restaurant_id !== context.restaurant.id) {
+      return jsonError("Producto no encontrado", 404);
     }
 
-    const { error } = await supabase.from("menu_items").update({ is_active: body.is_active }).eq("id", body.id);
-    if (error) return NextResponse.json({ error: "No se pudo cambiar estado" }, { status: 500 });
+    const { error } = await ctx.admin
+      .from("menu_items")
+      .update({ is_active: body.is_active })
+      .eq("id", body.id)
+      .eq("restaurant_id", context.restaurant.id);
+    if (error) return jsonError("No se pudo cambiar estado", 500, safeClientDbMessage("[staff/menu toggle]", error));
   }
 
   if (body.action === "delete") {
-    if (!body.id) return NextResponse.json({ error: "Falta id" }, { status: 400 });
+    if (!isUuid(body.id)) return jsonError("Falta id", 400);
 
-    const { data: existing } = await supabase
+    const { data: existing, error: fetchError } = await ctx.admin
       .from("menu_items")
       .select("restaurant_id")
       .eq("id", body.id)
       .maybeSingle();
-    if (!existing || existing.restaurant_id !== context.restaurant.id) {
-      return NextResponse.json({ error: "Producto no encontrado" }, { status: 404 });
+    if (fetchError || !existing || existing.restaurant_id !== context.restaurant.id) {
+      return jsonError("Producto no encontrado", 404);
     }
 
-    const { error } = await supabase.from("menu_items").delete().eq("id", body.id);
-    if (error) return NextResponse.json({ error: "No se pudo eliminar" }, { status: 500 });
+    const { error } = await ctx.admin
+      .from("menu_items")
+      .delete()
+      .eq("id", body.id)
+      .eq("restaurant_id", context.restaurant.id);
+    if (error) return jsonError("No se pudo eliminar", 500, safeClientDbMessage("[staff/menu delete]", error));
   }
 
   if (body.action === "create_category") {
-    if (!body.category_code || !body.category_name) {
-      return NextResponse.json({ error: "Faltan datos de categoria" }, { status: 400 });
+    const code = sanitizeText(body.category_code, 40)?.toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    const categoryName = sanitizeText(body.category_name, 80);
+    if (!code || !categoryName) {
+      return jsonError("Faltan datos de categoria", 400);
     }
 
-    const { error } = await supabase.from("menu_categories").insert({
+    const { error } = await ctx.admin.from("menu_categories").insert({
       restaurant_id: context.restaurant.id,
-      code: body.category_code,
-      name: body.category_name,
+      code,
+      name: categoryName,
       sort_order: context.categories.length + 1
     });
 
-    if (error) return NextResponse.json({ error: "No se pudo crear categoria" }, { status: 500 });
+    if (error) return jsonError("No se pudo crear categoria", 500, safeClientDbMessage("[staff/menu create_category]", error));
   }
 
   return NextResponse.json({ ok: true });

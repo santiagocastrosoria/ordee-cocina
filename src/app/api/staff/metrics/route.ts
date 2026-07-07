@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { resolveRestaurantFromRequest } from "@/lib/resolve-restaurant";
-import { createSupabaseAdmin } from "@/lib/supabase-admin";
+import { jsonError, safeClientDbMessage } from "@/lib/api/http";
+import { requireStaffAuth } from "@/lib/staff-auth";
+
+export const dynamic = "force-dynamic";
 
 type OrderRow = {
   id: string;
@@ -18,25 +20,43 @@ type OrderItemRow = {
 };
 
 export async function GET(request: NextRequest) {
-  const restaurant = await resolveRestaurantFromRequest(request);
-  if (!restaurant) {
-    return NextResponse.json({ error: "Restaurante no encontrado" }, { status: 404 });
-  }
+  const auth = await requireStaffAuth(request, "metrics:read");
+  if (!auth.ok) return auth.response;
 
-  const supabase = createSupabaseAdmin();
+  const { ctx } = auth;
 
-  const { data: orders } = await supabase
+  const metricsSince = new Date();
+  metricsSince.setDate(metricsSince.getDate() - 90);
+  const sinceIso = metricsSince.toISOString();
+
+  const { data: orders, error: ordersError } = await ctx.admin
     .from("orders")
     .select("id,total_ars,payment_status,payment_method,created_at,table_number")
-    .eq("restaurant_id", restaurant.id);
+    .eq("restaurant_id", ctx.restaurant.id)
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(5000);
 
-  const { data: orderItems } = await supabase
-    .from("order_items")
-    .select("order_id,item_name,quantity")
-    .in("order_id", (orders ?? []).map((row) => row.id));
+  if (ordersError) {
+    return jsonError("No se pudieron cargar metricas", 500, safeClientDbMessage("[staff/metrics]", ordersError));
+  }
+
+  const orderIds = (orders ?? []).map((row) => row.id);
+  let itemRows: OrderItemRow[] = [];
+
+  if (orderIds.length > 0) {
+    const { data: orderItems, error: itemsError } = await ctx.admin
+      .from("order_items")
+      .select("order_id,item_name,quantity")
+      .in("order_id", orderIds);
+
+    if (itemsError) {
+      return jsonError("No se pudieron cargar items", 500, safeClientDbMessage("[staff/metrics items]", itemsError));
+    }
+    itemRows = (orderItems ?? []) as OrderItemRow[];
+  }
 
   const rows = (orders ?? []) as OrderRow[];
-  const itemRows = (orderItems ?? []) as OrderItemRow[];
 
   const now = new Date();
   const startDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());

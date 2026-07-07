@@ -5,10 +5,21 @@
   "scripts": {
     "dev": "next dev --port 3010",
     "build": "next build",
-    "start": "next start --port 3010"
+    "start": "next start --port 3010",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "migrate:staff-auth": "node scripts/apply-staff-auth-migration.mjs",
+    "bootstrap:staff-users": "node scripts/bootstrap-staff-users.mjs",
+    "migrate:staff-memberships": "node scripts/apply-staff-memberships.mjs",
+    "seed:scastrosoria": "node scripts/seed-scastrosoria-memberships.mjs",
+    "verify:staff-auth": "node scripts/verify-staff-auth-ready.mjs",
+    "test:staff-auth": "bash scripts/staff-auth-tests.sh"
+  },
+  "engines": {
+    "node": ">=18.18.0"
   },
   "dependencies": {
-    "next": "14.2.5",
+    "next": "14.2.35",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "@supabase/ssr": "0.5.2",
@@ -18,6 +29,8 @@
     "@types/node": "20.14.12",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.35",
     "typescript": "5.5.4"
   }
 }
